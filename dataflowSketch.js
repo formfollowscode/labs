@@ -6,9 +6,12 @@
   * Disconnect a port to another.
   * Change the default value on a port.
   * Compute the graph.
+  * Accept multiple inputs (with list match)
 
   Not done:
-  * Accept multiple inputs.
+  * Multiple inputs without list matching
+  * Set up basic build system with:
+    * Framework, ESLint, Tests
   * Collapse subset of nodes.
 
   Assume nodes are provided externally.
@@ -30,20 +33,20 @@ class Graph {
 class Node {
   useCrossProduct;
 
-  _inputs; // {paramId, {defaultValue: dynamic, connections: [{id: string, paramId: string}]}}
-  _outputs; // {paramId, {value: dynamic, connections: [{id: string, paramId: string}]}}
+  _inputs; // {paramId, {values: dynamic, connections: [{id: string, paramId: string}]}}
+  _outputs; // {paramId, {values: dynamic, connections: [{id: string, paramId: string}]}}
   _transform;
 
   // sample inputs
   {
     angle: {
-      defaultValue: 0,
+      value: 0,
       connections: [
         {id: 20, paramId: angle}
       ]
     },
     width: {
-      defaultValue: 100,
+      value: 100,
       connections: [
         {id: 31, paramId: number},
         {id: 25, paramId: dimension}
@@ -104,7 +107,7 @@ class Graph {
       if (!visited.has(node)) {
         visit(node);
       }
-      index++;
+      index += 1;
     }
 
     return hasCycles ? null : ordered.reverse();
@@ -146,11 +149,6 @@ class Node {
     this._transform = transform;
   }
 
-  // can move this to graph class?
-  _getNodeById(id) {
-    return this.graph.getNodeById(id);
-  }
-
   connect(paramId, target, targetParamId) {
     if (!this.isConnected(target, targetParamId)) {
       let outConnections = this._outputs[paramId].connections;
@@ -169,55 +167,100 @@ class Node {
 
   disconnect(paramId, target, targetParamId) {
     let output = this._outputs[paramId];
-    let input = target._inputs[targetParamId];
+    output.connections = output.connections.filter((connection) => {
+      return connection.id !== target.id
+        && connection.paramId !== targetParamId;
+    });
 
-    output.connections = output.connections.filter((connection) =>
-      connection.id !== target.id && connection.paramId !== targetParamId
-    );
-    input.connections = input.connections.filter((connection) =>
-      connection.id !== this.id && connection.paramId !== paramId
-    );
+    let input = target._inputs[targetParamId];
+    input.connections = input.connections.filter((connection) => {
+      return connection.id !== this.id && connection.paramId !== paramId;
+    });
   }
 
   isConnected(target, targetParamId) {
-    return Object.keys(this._outputs).some((output) =>
-      output.connections.some((connection) =>
-        connection.id == target.id && connection.paramId == targetParamId
-      )
-    );
+    return Object.keys(this._outputs).some((output) => {
+      return output.connections.some((connection) => {
+        return connection.id == target.id
+          && connection.paramId == targetParamId;
+      });
+    });
   }
 
   getConnected() {
-    let childrenIds = Object.keys(this._outputs)
-      .reduce((childrenIds, output) => output.connections
-        .reduce((childrenIds, connection) => {
-          childrenIds[connection.id] = true;
-          return childrenIds;
-        }, childrenIds), {});
-
-    return Object.keys(childrenIds).map((id) => this._getNodeById(id));
-  }
-
-  updateDefault(paramId, value) {
-    this._inputs[paramId].defaultValue = value;
-  }
-
-  // needs to accept multiple inputs
-  // needs to accept <Function|Graph> transforms
-  compute() {
-    // resolve inputs
-    let inputs = Object.keys(this._inputs).reduce((inputs, paramId) => {
-      let connection = this._inputs[paramId].connections[0]
-      inputs[paramId] = connection
-        ? this._getNodeById(connection.id)._outputs[connection.paramId].value
-        : inputs[paramId].defaultValue;
-      return inputs;
+    let connectedIds = Object.keys(this._outputs).reduce((ids, paramId) => {
+      return this._outputs[paramId].connections.reduce((ids, connection) => {
+        ids[connection.id] = true
+        return ids;
+      }, ids);
     }, {});
 
-    let result = this._transform(inputs);
+    return Object.keys(connectedIds).map((id) => this.graph.getNodeById(id));
+  }
+
+  updateValue(paramId, value) {
+    this._inputs[paramId].values = [value];
+  }
+
+  // needs to accept <Function|Graph> inputs.
+  //
+  // let parameterSets = [
+  //   {a: 1, b: 3},
+  //   {a: 2, b: 4}
+  // ];
+  //
+  // _transform = function(paramSet) {
+  //   return {
+  //     product: paramSet.a * paramSet.b,
+  //     sum: paramSet.a + paramSet.b
+  //   };
+  // }
+  //
+  compute() {
+    let inputs = this._inputs;
+    let resolvedInputs = Object.keys(inputs).reduce((resolved, paramId) => {
+      let connections = inputs[paramId].connections;
+      if (connections.length > 0) {
+        resolved[paramId] = [];
+        connections.forEach((connection) => {
+          let incomingNode = this.graph.getNodeById(connection.id);
+          let values = incomingNode._outputs[connection.paramId].values;
+          values.forEach((val) => {
+            resolved[paramId].push(val);
+          });
+        });
+      } else {
+        resolved[paramId] = [inputs[paramId].value];
+      }
+      return resolved;
+    }, {});
+
+    let longestParam = Object.keys(resolvedInputs).reduce((prevId, currId) => {
+      let prevLength = resolvedInputs[prevId].length;
+      let currLength = resolvedInputs[currId].length;
+      return prevLength >= currLength ? prevId : currId;
+    });
+
+    let parameterSets = resolvedInputs[longestParam].map((value, index) => {
+      let paramSet = {};
+      Object.keys(resolvedInputs).forEach((paramId) => {
+        let values = resolvedInputs[paramId];
+        let currIndex = index % values.length;
+        paramSet[paramId] = values[currIndex];
+      });
+      return paramSet;
+    });
+
     Object.keys(this._outputs).forEach((paramId) => {
-      let output = this._outputs[paramId];
-      output.value = result[paramId];
+      this._outputs[paramId].value = [];
+    });
+
+    parameterSets.forEach((paramSet) => {
+      let result = this._transform(paramSet);
+      Object.keys(this._outputs).forEach((paramId) => {
+        let output = this._outputs[paramId];
+        output.values.push(result[paramId]);
+      });
     });
   }
 }
